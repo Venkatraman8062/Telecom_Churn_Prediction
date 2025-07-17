@@ -1,0 +1,371 @@
+# Business Objective: To predict the churn in the last (i.e. the ninth) month using the data (features) from the first three months.
+
+# Importing neccessary libraries for Data Preparation
+import numpy as np
+import pandas as pd
+
+# PROCESS - 1   DATA PREPARATION
+# Using numpy and panda library for EDA, Feature Engineering and Filtering High-Value Customers.
+
+# Importing the Dataset
+df = pd.read_csv('telecom_churn_data.csv')
+
+# Exploring the dataset
+print(df.shape)
+df.dtypes.value_counts()
+
+# Removing the columns with only one unique value to improve data quality for analysis.
+df.nunique().sort_values()
+
+unique_cols = df.nunique()
+one_value_cols = unique_cols[unique_cols == 1].index
+print("Columns with only one unique value:", list(one_value_cols))
+
+# Removing the columns with only one unique value to improve data quality for analysis.
+df = df.drop(columns=one_value_cols)
+
+df.shape
+
+# Converting the day of last recharge column into date-time format.
+date_cols = ['date_of_last_rech_6', 'date_of_last_rech_7', 'date_of_last_rech_8', 'date_of_last_rech_9']
+df[date_cols] = df[date_cols].apply(pd.to_datetime, errors='coerce')
+
+# Use the max date in the dataset as the reference date
+reference_date = df[date_cols].max().max()  
+
+# Calculate days since last recharge
+for col in date_cols:
+    df[f'days_since_last_{col[-1]}'] = (reference_date - df[col]).dt.days
+
+df['days_since_last_rech'] = df[f'days_since_last_{col[-1]}']
+
+print(df[[f'days_since_last_{col[-1]}' for col in date_cols]].isna().any(axis=1).sum())
+
+# Creating a column 'df['avg_rech_amt_6_7']' to identify High-Value customers and setting threshold value (>=threshold).
+df['avg_rech_amt_6_7'] = df[['total_rech_amt_6', 'total_rech_amt_7']].mean(axis=1)  # Average recharge amount across June and July
+threshold = np.percentile(df['avg_rech_amt_6_7'], 70)
+
+# Filtering high-value customers (High-Value customers given name X) based on the set threshold.
+X = df[df['avg_rech_amt_6_7'] >= threshold]
+print(f"Number of high-value customers: {X.shape[0]}")
+
+# Begining by tagging churners.
+# Ensuring we're working with a copy.
+X = X.copy()
+
+# Step 2: Taggibg churners safely using .loc
+X.loc[:, 'churn'] = ((X['total_og_mou_9'] == 0) & 
+                    (X['total_ic_mou_9'] == 0) & 
+                    (X['vol_2g_mb_9'] == 0) & 
+                    (X['vol_3g_mb_9'] == 0)).astype(int)
+
+# Tagged churners. Removing all the attributes corresponding to the churn phase (all attributes having ‘ _9’, etc. in their names).
+X = X[X.columns[~X.columns.str.endswith('_9')]]
+
+# Displaying churn distribution
+print(X['churn'].value_counts(normalize=True) * 100)
+print(f"Final shape after removing churn phase columns: {X.shape}")
+
+print(X.columns)
+
+# We have 'onnet' and 'offnet'. Any one can give us if they are on or off. So let us remove 3 colums from X.columns.
+# This will help avoid multicollinearity.
+
+columns_to_drop = ['onnet_mou_6', 'onnet_mou_7', 'onnet_mou_8'] 
+X = X.drop(columns=columns_to_drop, errors='ignore')
+
+# Print remaining columns
+print(X.columns)
+
+# Adding days since last recharge and removing the date-time column.
+X['days_since_last_rech'] = df['days_since_last_rech']
+
+# Remove date columns from X
+X = X.drop(columns=date_cols, errors='ignore')
+
+# Print remaining columns
+print(X.columns)
+# Print remaining columns
+print(len(X.columns))
+
+# Checking for missing values to handle them.
+print(X.isnull().sum().sum())  # Total missing values
+print(X.isnull().sum().sort_values(ascending=False).head(20))  
+
+# Filling missing va;ues with 0 
+# Telecom data might lose valuable information if missing values are removed.
+X = X.fillna(0)
+print(X.isnull().sum().sum())  # Should print 0 if all missing values are filled
+
+# Plotting a heatmap to see the correlation between variables.
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+# Select only numeric columns for correlation calculation
+X_numeric = X.select_dtypes(include=['number'])
+
+# Plot correlation heatmap
+plt.figure(figsize=(15, 10))
+sns.heatmap(X_numeric.corr(), cmap='coolwarm', annot=False, fmt=".2f", linewidths=0.5)
+plt.title("Feature Correlation Heatmap")
+plt.show()
+
+# Running the correlation analysis on X_numeric.
+corr_matrix = X_numeric.corr().abs()  
+upper_tri = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))  
+high_corr_features = [column for column in upper_tri.columns if any(upper_tri[column] > 0.8)]  
+
+print(f"Number of highly correlated columns: {len(high_corr_features)}")
+print(high_corr_features)  # List of features to be removed
+
+# Dropping highly correlated columns.
+X = X.drop(columns=high_corr_features, errors='ignore')
+
+print(f"Shape after removing highly correlated features: {X.shape}")
+
+# Checking for missing values.
+missing_values = X.isnull().sum()
+missing_values = missing_values[missing_values > 0]  # Only show columns with missing values
+
+print(f"Number of columns with missing values: {len(missing_values)}")
+print(missing_values)
+
+# PROCESS - 2   DATA MODELLING
+# Using sklearn libraries and statsmodels libraries for data modelling.
+
+from sklearn.preprocessing import StandardScaler
+
+# Selecting only numeric columns (excluding 'churn')
+numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+numeric_cols.remove('churn')  # Keep churn column separate
+
+# Initializing scaler
+scaler = StandardScaler()
+
+# Scaling only numeric features
+X_scaled = scaler.fit_transform(X[numeric_cols])
+
+# Convert back to DataFrame
+X_scaled = pd.DataFrame(X_scaled, columns=numeric_cols)
+
+# Adding 'churn' column back
+X_scaled['churn'] = X['churn'].values
+
+print("Feature scaling completed!")
+
+# Using variance threshold followed by VIF for better data modelling
+# This will help reduce multicollinearity
+
+from sklearn.feature_selection import VarianceThreshold
+
+# Applying Variance Threshold (removing features with near-zero variance)
+selector = VarianceThreshold(threshold=0.01)  # You can adjust the threshold if needed
+X_reduced = selector.fit_transform(X_scaled.drop(columns=['churn']))
+
+# Getting selected feature names
+selected_features = X_scaled.drop(columns=['churn']).columns[selector.get_support()]
+
+# Convert back to DataFrame
+X_reduced = pd.DataFrame(X_reduced, columns=selected_features)
+
+# Adding 'churn' column back
+X_reduced['churn'] = X_scaled['churn']
+
+print(f"Shape after removing low-variance features: {X_reduced.shape}")
+
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+
+# Function to calculate VIF and drop highly collinear features
+def remove_high_vif_features(X, threshold=5.0):
+    vif_data = pd.DataFrame()
+    vif_data["Feature"] = X.columns
+    vif_data["VIF"] = [variance_inflation_factor(X.values, i) for i in range(X.shape[1])]
+    
+    while vif_data["VIF"].max() > threshold:
+        highest_vif_feature = vif_data.loc[vif_data["VIF"].idxmax(), "Feature"]
+        print(f"Dropping {highest_vif_feature} with VIF: {vif_data['VIF'].max():.2f}")
+        
+        X = X.drop(columns=[highest_vif_feature])
+        
+        vif_data = pd.DataFrame()
+        vif_data["Feature"] = X.columns
+        vif_data["VIF"] = [variance_inflation_factor(X.values, i) for i in range(X.shape[1])]
+    
+    return X
+
+# Applying VIF elimination
+X_final = remove_high_vif_features(X_reduced, threshold=5.0)
+
+print(f"Final shape after removing multicollinear features: {X_final.shape}")
+
+X.dtypes
+
+X = X.astype({col: 'int32' for col in X.select_dtypes(include=['float']).columns})
+
+print(X.select_dtypes(include=['object']).columns)
+
+X = X.select_dtypes(exclude=['object'])
+
+y = y.drop(columns=['mobile_number', 'days_since_last_8'])
+
+# Using RandomForest for feature selection and creating a logistic regression model.
+
+from sklearn.feature_selection import RFE
+from sklearn.ensemble import RandomForestClassifier  
+from sklearn.model_selection import train_test_split
+
+# Split data (y is the target variable)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Initialize the model (RandomForest works well for feature selection)
+model = RandomForestClassifier(n_estimators=100, random_state=42)
+
+# Applying RFE (Setting n_features_to_select based on how many features is required)
+rfe = RFE(model, n_features_to_select=15) 
+X_train_rfe = rfe.fit_transform(X_train, y_train)
+X_test_rfe = rfe.transform(X_test)
+
+print(X_train.dtypes)
+
+# Dropping mobile_number and any date-related columns.
+X_train = X_train.drop(columns=['mobile_number'], errors='ignore')
+X_test = X_test.drop(columns=['mobile_number'], errors='ignore')
+
+# Identifying columns with non-numeric values.
+non_numeric_columns = X_train.select_dtypes(exclude=['number']).columns
+print("Columns with non-numeric values:", non_numeric_columns)
+
+print("Columns with non-numeric values:", non_numeric_columns)
+
+print(X_train.dtypes.unique())
+
+# Getting selected feature names.
+selected_features = X.columns[rfe.support_]
+print(f"Selected Features: {selected_features}")
+
+# Making sure training (X_train_rfe) and testing (X_test_rfe) datasets contain only the selected features:
+X_train_rfe = X_train[selected_features]
+X_test_rfe = X_test[selected_features]
+
+# Training a machine learning model using the selected features:
+from sklearn.ensemble import RandomForestClassifier
+
+# Initializing the model
+model = RandomForestClassifier(n_estimators=100, random_state=42)
+
+# Training the model
+model.fit(X_train_rfe, y_train)
+
+# Using sklearn metrics to predict model accuracy.
+
+from sklearn.metrics import accuracy_score, classification_report
+
+# Make predictions
+y_pred = model.predict(X_test_rfe)
+
+# Evaluate
+accuracy = accuracy_score(y_test, y_pred)
+print(f"Model Accuracy: {accuracy:.4f}")
+
+print("Classification Report:")
+print(classification_report(y_test, y_pred))
+
+# The Model Accuracy is 0.94, which is good. But, the data is imbalanced.
+# Handling class imbalance and then retesting the model.
+
+from sklearn.preprocessing import StandardScaler
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+model = LogisticRegression(class_weight='balanced', max_iter=5000, random_state=42)
+model.fit(X_train_scaled, y_train)
+
+# Training Logistic Regression Again.
+from sklearn.linear_model import LogisticRegression
+
+# Train the model
+model = LogisticRegression(class_weight='balanced', solver='saga', max_iter=5000, random_state=42)
+model.fit(X_train_scaled, y_train)
+
+# Predict on test data
+y_pred = model.predict(X_test_scaled)
+
+
+from sklearn.metrics import classification_report, accuracy_score
+
+print("Model Accuracy:", accuracy_score(y_test, y_pred))
+print("Classification Report:\n", classification_report(y_test, y_pred))
+
+# The accuracy is 0.82, but the data imbalance still exists in the model.
+# Using RandonForest to create another model to check if the precdiction increases.
+
+from imblearn.over_sampling import SMOTE
+
+# Initialize SMOTE
+smote = SMOTE(sampling_strategy='auto', random_state=42)
+
+# Apply SMOTE to training data
+X_train_balanced, y_train_balanced = smote.fit_resample(X_train_scaled, y_train)
+
+
+rf_model = RandomForestClassifier(n_estimators=200, class_weight='balanced', random_state=42)
+rf_model.fit(X_train_balanced, y_train_balanced)
+
+y_pred_rf = rf_model.predict(X_test_scaled)
+
+print("Random Forest Report:\n", classification_report(y_test, y_pred_rf))
+
+
+# The prediction is 60% correct and has lesser data imbalance thanthe previous model which was 31% correct and had class imbalance.
+# We are taking this model to see which feature impacts churrn.
+
+# Feature Importance Analysis
+# To understand which features impact churn the most, extract feature importances:
+
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+
+# Get feature importances
+feature_importances = rf_model.feature_importances_
+
+# Create a DataFrame
+feat_importance_df = pd.DataFrame({'Feature': X_train.columns, 'Importance': feature_importances})
+
+# Sort by importance
+feat_importance_df = feat_importance_df.sort_values(by='Importance', ascending=False)
+
+# Plot the top 10 features
+plt.figure(figsize=(10,6))
+plt.barh(feat_importance_df['Feature'][:10], feat_importance_df['Importance'][:10], color='skyblue')
+plt.xlabel("Feature Importance")
+plt.ylabel("Feature Name")
+plt.title("Top 10 Important Features for Churn Prediction")
+plt.gca().invert_yaxis()  # Invert y-axis for better readability
+plt.show()
+
+
+# We have taken top 10 features that predict churn. 
+# The prediction suggests that roam_ic_mou_8 has the hightest importance in predictiong churn rate.
+
+# PREDICTIONS
+
+# The 8th month has been very important to identify customers who are likely to churn.
+# This month is the 'action phase'.
+
+# Identifying the usage statistics of customer after good phase is very important in the likelihood of churn.
+# We need to create a model where a customers good phase is detected.
+# When the usage statistics of the cuustomer is likely starting to match with the action phase, that customer is likely to churn.
+
+# The reason for churn can be 
+#  - Offer from other network  : Compare the previous recharges done with the other network to give better offers and retain customer.
+#  - Signal problem            : Compare the roaming call and see the average time spent on call. If the average is less and reason is signal, 
+#                                improve signal in that particular area.
+#  - Data                      : Check data usage. If the person uses data or not. If data not used, use demographic factors to identify the person and 
+#                                give related offers. If the data usage is less or has become less over a period of time, then check for network strenght.
+#                                Check if the tower has changed. Improve the signal. (Take this as a call to improve network at that area)
+
+# Handling of the data like a stock market prediction is must. 
+# Analyse usase pattern to identify the three phases to take action during the action phase to avoid churn.
